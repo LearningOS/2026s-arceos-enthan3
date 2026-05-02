@@ -133,11 +133,19 @@ impl VfsNodeOps for RootDirectory {
     }
 
     fn rename(&self, src_path: &str, dst_path: &str) -> VfsResult {
-        self.lookup_mounted_fs(src_path, |fs, rest_path| {
-            if rest_path.is_empty() {
+        self.lookup_mounted_fs(src_path, |src_fs, src_rest_path| {
+            if src_rest_path.is_empty() {
                 ax_err!(PermissionDenied) // cannot rename mount points
             } else {
-                fs.root_dir().rename(rest_path, dst_path)
+                self.lookup_mounted_fs(dst_path, |dst_fs, dst_rest_path| {
+                    if dst_rest_path.is_empty() {
+                        ax_err!(PermissionDenied) // cannot rename mount points
+                    } else if !Arc::ptr_eq(&src_fs, &dst_fs) {
+                        ax_err!(InvalidInput) // cannot rename across filesystems
+                    } else {
+                        src_fs.root_dir().rename(src_rest_path, dst_rest_path)
+                    }
+                })
             }
         })
     }
@@ -302,6 +310,9 @@ pub(crate) fn set_current_dir(path: &str) -> AxResult {
 }
 
 pub(crate) fn rename(old: &str, new: &str) -> AxResult {
+    if absolute_path(old)? == absolute_path(new)? {
+        return Ok(());
+    }
     if parent_node_of(None, new).lookup(new).is_ok() {
         warn!("dst file already exist, now remove it");
         remove_file(None, new)?;

@@ -93,6 +93,7 @@ elf = { path = "modules/elf" }
 axfs_ramfs = { path = "./axfs_ramfs" }
 
 [patch.crates-io]
+axfs_ramfs = { path = "./axfs_ramfs" }
 kernel_guard = { path = "../crates/kernel_guard"} 
 
 [profile.release]

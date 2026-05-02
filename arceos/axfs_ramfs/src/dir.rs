@@ -2,6 +2,7 @@ use alloc::collections::BTreeMap;
 use alloc::sync::{Arc, Weak};
 use alloc::{string::String, vec::Vec};
 
+use axfs_vfs::path::canonicalize;
 use axfs_vfs::{VfsDirEntry, VfsNodeAttr, VfsNodeOps, VfsNodeRef, VfsNodeType};
 use axfs_vfs::{VfsError, VfsResult};
 use spin::RwLock;
@@ -66,6 +67,61 @@ impl DirNode {
         }
         children.remove(name);
         Ok(())
+    }
+
+    /// Renames a child node in this directory.
+    pub fn rename_node(&self, src_name: &str, dst_name: &str) -> VfsResult {
+        if src_name.is_empty()
+            || src_name == "."
+            || src_name == ".."
+            || dst_name.is_empty()
+            || dst_name == "."
+            || dst_name == ".."
+        {
+            return Err(VfsError::InvalidInput);
+        }
+        if src_name == dst_name {
+            return Ok(());
+        }
+
+        let mut children = self.children.write();
+        if children.contains_key(dst_name) {
+            return Err(VfsError::AlreadyExists);
+        }
+        let node = children.remove(src_name).ok_or(VfsError::NotFound)?;
+        children.insert(dst_name.into(), node);
+        Ok(())
+    }
+
+    fn rename_node_at(&self, dir_path: &str, src_name: &str, dst_name: &str) -> VfsResult {
+        let (name, rest) = split_path(dir_path);
+        match name {
+            "" | "." => {
+                if let Some(rest) = rest {
+                    self.rename_node_at(rest, src_name, dst_name)
+                } else {
+                    self.rename_node(src_name, dst_name)
+                }
+            }
+            ".." => Err(VfsError::InvalidInput),
+            _ => {
+                let subdir_node = self
+                    .children
+                    .read()
+                    .get(name)
+                    .ok_or(VfsError::NotFound)?
+                    .clone();
+                let subdir = subdir_node
+                    .as_any()
+                    .downcast_ref::<DirNode>()
+                    .ok_or(VfsError::NotADirectory)?;
+                if let Some(rest) = rest {
+                    subdir.rename_node_at(rest, src_name, dst_name)
+                } else {
+                    subdir.rename_node(src_name, dst_name)
+                }
+            }
+        }
     }
 }
 
@@ -165,7 +221,33 @@ impl VfsNodeOps for DirNode {
         }
     }
 
+    fn rename(&self, src_path: &str, dst_path: &str) -> VfsResult {
+        log::debug!(
+            "rename at ramfs, src_path: {}, dst_path: {}",
+            src_path,
+            dst_path
+        );
+
+        let src_path = canonicalize(src_path);
+        let dst_path = canonicalize(dst_path);
+        let (src_parent, src_name) = split_parent(&src_path)?;
+        let (dst_parent, dst_name) = split_parent(&dst_path)?;
+        if src_parent != dst_parent {
+            return Err(VfsError::InvalidInput);
+        }
+
+        self.rename_node_at(src_parent, src_name, dst_name)
+    }
+
     axfs_vfs::impl_vfs_dir_default! {}
+}
+
+fn split_parent(path: &str) -> VfsResult<(&str, &str)> {
+    let path = path.trim_matches('/');
+    if path.is_empty() || path == "." || path == ".." {
+        return Err(VfsError::InvalidInput);
+    }
+    Ok(path.rsplit_once('/').unwrap_or(("", path)))
 }
 
 fn split_path(path: &str) -> (&str, Option<&str>) {
