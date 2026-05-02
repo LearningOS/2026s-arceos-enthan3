@@ -1,7 +1,7 @@
 use core::arch::asm;
-use memory_addr::VirtAddr;
 #[cfg(feature = "uspace")]
 use memory_addr::PhysAddr;
+use memory_addr::VirtAddr;
 
 include_asm_marcos!();
 
@@ -199,6 +199,7 @@ impl UspaceContext {
     /// and the argument.
     pub fn new(entry: usize, ustack_top: VirtAddr) -> Self {
         const SPIE: usize = 1 << 5;
+        const FS: usize = 3 << 13;
         const SUM: usize = 1 << 18;
         Self(TrapFrame {
             regs: GeneralRegisters {
@@ -206,7 +207,7 @@ impl UspaceContext {
                 ..Default::default()
             },
             sepc: entry,
-            sstatus: SPIE | SUM,
+            sstatus: SPIE | FS | SUM,
         })
     }
 

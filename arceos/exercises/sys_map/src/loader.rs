@@ -1,12 +1,12 @@
-use std::io::{self, Read};
-use std::io::SeekFrom;
-use std::io::Seek;
-use std::fs::File;
-use alloc::vec::Vec;
 use alloc::vec;
+use alloc::vec::Vec;
+use axhal::mem::{MemoryAddr, VirtAddr, PAGE_SIZE_4K};
 use axhal::paging::MappingFlags;
-use axhal::mem::{PAGE_SIZE_4K, VirtAddr, MemoryAddr};
 use axmm::AddrSpace;
+use std::fs::File;
+use std::io::Seek;
+use std::io::SeekFrom;
+use std::io::{self, Read};
 
 use elf::abi::{PT_INTERP, PT_LOAD};
 use elf::endian::AnyEndian;
@@ -17,22 +17,47 @@ use elf::ElfBytes;
 
 const ELF_HEAD_BUF_SIZE: usize = 256;
 
-pub fn load_user_app(fname: &str, uspace: &mut AddrSpace) -> io::Result<usize> {
+pub struct AppInfo {
+    pub entry: usize,
+    pub phdr: usize,
+    pub phent: usize,
+    pub phnum: usize,
+    pub heap_base: usize,
+}
+
+pub fn load_user_app(fname: &str, uspace: &mut AddrSpace) -> io::Result<AppInfo> {
     let mut file = File::open(fname)?;
-    let (phdrs, entry, _, _) = load_elf_phdrs(&mut file)?;
+    let (phdrs, entry, phoff, phent, phnum) = load_elf_phdrs(&mut file)?;
+    let mut phdr_addr = 0;
+    let mut heap_base = 0;
 
     for phdr in &phdrs {
         ax_println!(
             "phdr: offset: {:#X}=>{:#X} size: {:#X}=>{:#X}",
-            phdr.p_offset, phdr.p_vaddr, phdr.p_filesz, phdr.p_memsz
+            phdr.p_offset,
+            phdr.p_vaddr,
+            phdr.p_filesz,
+            phdr.p_memsz
         );
+        if phdr.p_type != PT_LOAD {
+            continue;
+        }
+        let segment_file_end = phdr.p_offset + phdr.p_filesz;
+        if phdr.p_offset <= phoff as u64 && (phoff as u64) < segment_file_end {
+            phdr_addr = phdr.p_vaddr as usize + phoff - phdr.p_offset as usize;
+        }
+        heap_base = heap_base.max((phdr.p_vaddr + phdr.p_memsz) as usize);
 
         let vaddr = VirtAddr::from(phdr.p_vaddr as usize).align_down_4k();
-        let vaddr_end = VirtAddr::from((phdr.p_vaddr+phdr.p_memsz) as usize)
-            .align_up_4k();
+        let vaddr_end = VirtAddr::from((phdr.p_vaddr + phdr.p_memsz) as usize).align_up_4k();
 
         ax_println!("{:#x} - {:#x}", vaddr, vaddr_end);
-        uspace.map_alloc(vaddr, vaddr_end-vaddr, MappingFlags::READ|MappingFlags::WRITE|MappingFlags::EXECUTE|MappingFlags::USER, true)?;
+        uspace.map_alloc(
+            vaddr,
+            vaddr_end - vaddr,
+            MappingFlags::READ | MappingFlags::WRITE | MappingFlags::EXECUTE | MappingFlags::USER,
+            true,
+        )?;
 
         let mut data = vec![0u8; phdr.p_memsz as usize];
         file.seek(SeekFrom::Start(phdr.p_offset))?;
@@ -47,10 +72,16 @@ pub fn load_user_app(fname: &str, uspace: &mut AddrSpace) -> io::Result<usize> {
         uspace.write(VirtAddr::from(phdr.p_vaddr as usize), &data)?;
     }
 
-    Ok(entry)
+    Ok(AppInfo {
+        entry,
+        phdr: phdr_addr,
+        phent,
+        phnum,
+        heap_base: heap_base.align_up_4k(),
+    })
 }
 
-fn load_elf_phdrs(file: &mut File) -> io::Result<(Vec<ProgramHeader>, usize, usize, usize)> {
+fn load_elf_phdrs(file: &mut File) -> io::Result<(Vec<ProgramHeader>, usize, usize, usize, usize)> {
     let mut buf: [u8; ELF_HEAD_BUF_SIZE] = [0; ELF_HEAD_BUF_SIZE];
     file.read(&mut buf)?;
 
@@ -72,5 +103,11 @@ fn load_elf_phdrs(file: &mut File) -> io::Result<(Vec<ProgramHeader>, usize, usi
         .iter()
         .filter(|phdr| phdr.p_type == PT_LOAD || phdr.p_type == PT_INTERP)
         .collect();
-    Ok((phdrs, ehdr.e_entry as usize, ehdr.e_phoff as usize, ehdr.e_phnum as usize))
+    Ok((
+        phdrs,
+        ehdr.e_entry as usize,
+        ehdr.e_phoff as usize,
+        ehdr.e_phentsize as usize,
+        ehdr.e_phnum as usize,
+    ))
 }
